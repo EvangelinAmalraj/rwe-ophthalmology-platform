@@ -1,0 +1,27 @@
+.container {
+  padding: 30px;
+  font-family: Arial;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 40px;
+}
+
+.filters {
+  margin-bottom: 30px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 15px;
+  align-items: center;
+}
+
+.filters label {
+  margin-right: 5px;
+}
+
+.filters button {
+  padding: 5px 10px;
+  cursor: pointer;
+}
