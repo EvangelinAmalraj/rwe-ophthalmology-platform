@@ -1,24 +1,76 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Date, text
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Date, text, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 from datetime import date
 from typing import Optional
 from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+from fastapi import Query
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import io
 
-# ---------------- DATABASE ----------------
+# ---------------------------------------------------------
+# 1. DATABASE CONFIGURATION
+# ---------------------------------------------------------
 DATABASE_URL = "postgresql://postgres:061204@localhost:5432/rwe_db"
 engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+# Dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-app = FastAPI()
+# ---------------------------------------------------------
+# 2. DATABASE MODELS
+# ---------------------------------------------------------
+class Patient(Base):
+    __tablename__ = "patients"
+    id = Column(Integer, primary_key=True, index=True)
+    age = Column(Integer)
+    gender = Column(String)
+    diagnosis = Column(String)
+    bcva = Column(Float)
+    irf = Column(Boolean)
+    srf = Column(Boolean)
 
-# ---------------- CORS ----------------
+class Visit(Base):
+    __tablename__ = "visits"
+    id = Column(Integer, primary_key=True, index=True)
+    patient_id = Column(Integer, ForeignKey("patients.id"))
+    visit_date = Column(Date)
+    bcva = Column(Float)
+    injections = Column(Integer, default=0)
+    irf = Column(Boolean, default=False)
+    srf = Column(Boolean, default=False)
+    hard_exudates = Column(Boolean, default=False)
+    hrf = Column(Boolean, default=False)
+    molecule = Column(String, default="")
+    regimen = Column(String, default="")
+
+class AdverseEvent(Base):
+    __tablename__ = "adverse_events"
+    id = Column(Integer, primary_key=True, index=True)
+    patient_id = Column(Integer, ForeignKey("patients.id"))
+    visit_id = Column(Integer, ForeignKey("visits.id"))
+    description = Column(String)
+    severity = Column(String)
+    date_reported = Column(Date)
+
+# Create all tables in PostgreSQL
+Base.metadata.create_all(bind=engine)
+
+# ---------------------------------------------------------
+# 3. FASTAPI APP SETUP
+# ---------------------------------------------------------
+app = FastAPI(title="RWE Ophthalmology Platform")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -26,49 +78,62 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+@app.get("/")
+def root():
+    return {"message": "RWE Backend Running"}
 
-# ---------------- MODELS ----------------
-class Patient(Base):
-    __tablename__ = "patients"
-    id = Column(Integer, primary_key=True)
-    age = Column(Integer)
-    gender = Column(String)
-    diagnosis = Column(String)
-    co_morbidities = Column(String)
-    medications = Column(String)
-
-class Visit(Base):
-    __tablename__ = "visits"
-    id = Column(Integer, primary_key=True)
-    patient_id = Column(Integer)
-    visit_date = Column(Date)
-    bcva = Column(Float)
-    injections = Column(Integer)
-    irf = Column(Boolean)
-    srf = Column(Boolean)
-    hard_exudates = Column(Boolean)
-    hrf = Column(Boolean)
-    molecule = Column(String)
-    regimen = Column(String)
-
-class AdverseEvent(Base):
-    __tablename__ = "adverse_events"
-    id = Column(Integer, primary_key=True)
-    patient_id = Column(Integer)
-    visit_id = Column(Integer)
-    description = Column(String)
-    severity = Column(String)
-    date_reported = Column(Date)
-
-Base.metadata.create_all(engine)
-
-# ---------------- PATIENT APIs ----------------
-@app.post("/patients")
-def add_patient(age: int, gender: str, diagnosis: str,
-                co_morbidities: str = "", medications: str = ""):
+# ✅ THIS IS THE MISSING API
+@app.get("/patients")
+def get_patients():
     db = SessionLocal()
-    patient = Patient(age=age, gender=gender, diagnosis=diagnosis,
-                      co_morbidities=co_morbidities, medications=medications)
+    try:
+        patients = db.query(Patient).all()
+        return patients
+    finally:
+        db.close()
+
+@app.get("/patients/filter")
+def filter_patients(
+    diagnosis: Optional[str] = Query(None),
+    min_age: Optional[int] = Query(None),
+    max_age: Optional[int] = Query(None),
+):
+    db = SessionLocal()
+    query = db.query(Patient)
+
+    if diagnosis:
+        query = query.filter(Patient.diagnosis == diagnosis)
+
+    if min_age is not None:
+        query = query.filter(Patient.age >= min_age)
+
+    if max_age is not None:
+        query = query.filter(Patient.age <= max_age)
+
+    results = query.all()
+    db.close()
+    return results
+# ---------------------------------------------------------
+# 4. DATA ENTRY APIs (POST)
+# ---------------------------------------------------------
+@app.post("/patients")
+def add_patient(
+    age: int,
+    gender: str,
+    diagnosis: str,
+    bcva: float,
+    irf: bool,
+    srf: bool,
+    db: Session = Depends(get_db)
+):
+    patient = Patient(
+        age=age,
+        gender=gender,
+        diagnosis=diagnosis,
+        bcva=bcva,
+        irf=irf,
+        srf=srf
+    )
     db.add(patient)
     db.commit()
     return {"message": "Patient added"}
@@ -76,155 +141,286 @@ def add_patient(age: int, gender: str, diagnosis: str,
 @app.post("/visits")
 def add_visit(patient_id: int, visit_date: date, bcva: float, injections: int,
               irf: bool, srf: bool, hard_exudates: bool, hrf: bool,
-              molecule: str, regimen: str):
-    db = SessionLocal()
-    visit = Visit(patient_id=patient_id, visit_date=visit_date,
-                  bcva=bcva, injections=injections, irf=irf, srf=srf,
+              molecule: str, regimen: str, db: Session = Depends(get_db)):
+    visit = Visit(patient_id=patient_id, visit_date=visit_date, bcva=bcva, 
+                  injections=injections, irf=irf, srf=srf, 
                   hard_exudates=hard_exudates, hrf=hrf,
                   molecule=molecule, regimen=regimen)
     db.add(visit)
     db.commit()
     return {"message": "Visit added"}
 
-@app.post("/adverse-events")
-def add_adverse_event(patient_id: int, visit_id: int, description: str,
-                      severity: str, date_reported: date):
-    db = SessionLocal()
-    event = AdverseEvent(patient_id=patient_id, visit_id=visit_id,
-                         description=description, severity=severity,
-                         date_reported=date_reported)
-    db.add(event)
-    db.commit()
-    return {"message": "Adverse event added"}
+# ---------------------------------------------------------
+# 5. ANALYTICS APIs (GET)
+# ---------------------------------------------------------
 
-# ---------------- ANALYTICS ----------------
 @app.get("/analytics/bcva-filtered")
-def filtered_bcva(diagnosis: Optional[str] = None,
-                  min_age: Optional[int] = None,
-                  max_age: Optional[int] = None,
-                  start_date: Optional[str] = None,
-                  end_date: Optional[str] = None):
+def filtered_bcva(
+    diagnosis: Optional[str] = Query(None),
+    min_age: Optional[int] = Query(None),
+    max_age: Optional[int] = Query(None),
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """BCVA over time with optional clinical filters.
 
-    # Convert empty strings to None
-    if diagnosis == "":
-        diagnosis = None
-    if min_age == "" or min_age is None:
-        min_age = None
-    if max_age == "" or max_age is None:
-        max_age = None
-    if start_date == "":
-        start_date = None
-    if end_date == "":
-        end_date = None
+    This endpoint is the *single source of truth* for filter logic so that
+    frontend charts and the PDF export stay consistent.
+    """
 
-    query = "SELECT v.visit_date, v.bcva FROM visits v JOIN patients p ON v.patient_id = p.id WHERE 1=1"
+    query = (
+        "SELECT v.visit_date, v.bcva "
+        "FROM visits v JOIN patients p ON v.patient_id = p.id "
+        "WHERE 1=1"
+    )
     params = {}
+
     if diagnosis:
         query += " AND p.diagnosis = :diagnosis"
         params["diagnosis"] = diagnosis
-    if min_age:
+
+    if min_age is not None:
         query += " AND p.age >= :min_age"
         params["min_age"] = min_age
-    if max_age:
+
+    if max_age is not None:
         query += " AND p.age <= :max_age"
         params["max_age"] = max_age
-    if start_date:
+
+    if start_date is not None:
         query += " AND v.visit_date >= :start_date"
         params["start_date"] = start_date
-    if end_date:
+
+    if end_date is not None:
         query += " AND v.visit_date <= :end_date"
         params["end_date"] = end_date
-    query += " ORDER BY v.visit_date"
 
-    result = engine.execute(text(query), params)
+    query += " ORDER BY v.visit_date"
+    result = db.execute(text(query), params)
     return [{"date": r[0], "bcva": r[1]} for r in result]
 
 @app.get("/analytics/injection-bcva")
-def injection_vs_bcva():
-    result = engine.execute(text("SELECT injections, AVG(bcva) FROM visits GROUP BY injections ORDER BY injections"))
-    return [{"injections": r[0], "avg_bcva": r[1]} for r in result]
+def injection_vs_bcva(
+    diagnosis: Optional[str] = Query(None),
+    min_age: Optional[int] = Query(None),
+    max_age: Optional[int] = Query(None),
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Average BCVA by injection count, with the same filters as /analytics/bcva-filtered."""
 
-@app.get("/analytics/fluid")
-def fluid_analysis():
-    result = engine.execute(text("SELECT SUM(CASE WHEN irf=true THEN 1 ELSE 0 END), SUM(CASE WHEN srf=true THEN 1 ELSE 0 END) FROM visits")).fetchone()
-    return [{"type": "IRF", "count": result[0]}, {"type": "SRF", "count": result[1]}]
-
-@app.get("/analytics/hard-hrf")
-def hard_hrf_analysis():
-    result = engine.execute(text("SELECT SUM(CASE WHEN hard_exudates=true THEN 1 ELSE 0 END), SUM(CASE WHEN hrf=true THEN 1 ELSE 0 END) FROM visits")).fetchone()
-    return [{"type": "Hard Exudates", "count": result[0]}, {"type": "HRF", "count": result[1]}]
-
-# ---------------- PDF EXPORT ----------------
-@app.get("/export/pdf")
-def export_pdf(diagnosis: Optional[str] = None,
-               min_age: Optional[int] = None,
-               max_age: Optional[int] = None,
-               start_date: Optional[str] = None,
-               end_date: Optional[str] = None):
-
-    # Convert empty strings to None
-    if diagnosis == "":
-        diagnosis = None
-    if min_age == "" or min_age is None:
-        min_age = None
-    if max_age == "" or max_age is None:
-        max_age = None
-    if start_date == "":
-        start_date = None
-    if end_date == "":
-        end_date = None
-
-    query = "SELECT v.visit_date, v.bcva, v.injections, p.age, p.diagnosis FROM visits v JOIN patients p ON v.patient_id = p.id WHERE 1=1"
+    query = (
+        "SELECT v.injections, AVG(v.bcva) "
+        "FROM visits v JOIN patients p ON v.patient_id = p.id "
+        "WHERE 1=1"
+    )
     params = {}
+
     if diagnosis:
         query += " AND p.diagnosis = :diagnosis"
         params["diagnosis"] = diagnosis
-    if min_age:
+
+    if min_age is not None:
         query += " AND p.age >= :min_age"
         params["min_age"] = min_age
-    if max_age:
+
+    if max_age is not None:
         query += " AND p.age <= :max_age"
         params["max_age"] = max_age
-    if start_date:
+
+    if start_date is not None:
         query += " AND v.visit_date >= :start_date"
         params["start_date"] = start_date
-    if end_date:
+
+    if end_date is not None:
         query += " AND v.visit_date <= :end_date"
         params["end_date"] = end_date
 
-    result = engine.execute(text(query), params).fetchall()
+    query += " GROUP BY v.injections ORDER BY v.injections"
+    result = db.execute(text(query), params)
+    return [{"injections": r[0], "avg_bcva": r[1]} for r in result]
 
-    # Create PDF
+
+@app.get("/analytics/fluid")
+def fluid_analysis(
+    diagnosis: Optional[str] = Query(None),
+    min_age: Optional[int] = Query(None),
+    max_age: Optional[int] = Query(None),
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """IRF / SRF counts with optional filters."""
+
+    query = (
+        "SELECT "
+        "SUM(CASE WHEN v.irf=true THEN 1 ELSE 0 END) AS irf_count, "
+        "SUM(CASE WHEN v.srf=true THEN 1 ELSE 0 END) AS srf_count "
+        "FROM visits v JOIN patients p ON v.patient_id = p.id "
+        "WHERE 1=1"
+    )
+    params = {}
+
+    if diagnosis:
+        query += " AND p.diagnosis = :diagnosis"
+        params["diagnosis"] = diagnosis
+
+    if min_age is not None:
+        query += " AND p.age >= :min_age"
+        params["min_age"] = min_age
+
+    if max_age is not None:
+        query += " AND p.age <= :max_age"
+        params["max_age"] = max_age
+
+    if start_date is not None:
+        query += " AND v.visit_date >= :start_date"
+        params["start_date"] = start_date
+
+    if end_date is not None:
+        query += " AND v.visit_date <= :end_date"
+        params["end_date"] = end_date
+
+    result = db.execute(text(query), params).fetchone()
+    return [
+        {"type": "IRF", "count": (result[0] or 0) if result else 0},
+        {"type": "SRF", "count": (result[1] or 0) if result else 0},
+    ]
+
+
+@app.get("/analytics/hard-hrf")
+def hard_hrf_analysis(
+    diagnosis: Optional[str] = Query(None),
+    min_age: Optional[int] = Query(None),
+    max_age: Optional[int] = Query(None),
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Hard exudates / HRF counts with optional filters."""
+
+    query = (
+        "SELECT "
+        "SUM(CASE WHEN v.hard_exudates=true THEN 1 ELSE 0 END) AS hard_exudates_count, "
+        "SUM(CASE WHEN v.hrf=true THEN 1 ELSE 0 END) AS hrf_count "
+        "FROM visits v JOIN patients p ON v.patient_id = p.id "
+        "WHERE 1=1"
+    )
+    params = {}
+
+    if diagnosis:
+        query += " AND p.diagnosis = :diagnosis"
+        params["diagnosis"] = diagnosis
+
+    if min_age is not None:
+        query += " AND p.age >= :min_age"
+        params["min_age"] = min_age
+
+    if max_age is not None:
+        query += " AND p.age <= :max_age"
+        params["max_age"] = max_age
+
+    if start_date is not None:
+        query += " AND v.visit_date >= :start_date"
+        params["start_date"] = start_date
+
+    if end_date is not None:
+        query += " AND v.visit_date <= :end_date"
+        params["end_date"] = end_date
+
+    result = db.execute(text(query), params).fetchone()
+    return [
+        {"type": "Hard Exudates", "count": (result[0] or 0) if result else 0},
+        {"type": "HRF", "count": (result[1] or 0) if result else 0},
+    ]
+
+
+# ---------------------------------------------------------
+# 6. PDF EXPORT API
+# ---------------------------------------------------------
+@app.get("/export/pdf")
+def export_pdf(
+    diagnosis: Optional[str] = Query(None),
+    min_age: Optional[int] = Query(None),
+    max_age: Optional[int] = Query(None),
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Generate a PDF report using the *same filters* as /analytics/bcva-filtered.
+
+    Whatever is visible on the dashboard for BCVA should match this export.
+    """
+
+    query = (
+        "SELECT v.visit_date, v.bcva, v.injections, p.age, p.diagnosis "
+        "FROM visits v JOIN patients p ON v.patient_id = p.id "
+        "WHERE 1=1"
+    )
+    params = {}
+
+    if diagnosis:
+        query += " AND p.diagnosis = :diagnosis"
+        params["diagnosis"] = diagnosis
+
+    if min_age is not None:
+        query += " AND p.age >= :min_age"
+        params["min_age"] = min_age
+
+    if max_age is not None:
+        query += " AND p.age <= :max_age"
+        params["max_age"] = max_age
+
+    if start_date is not None:
+        query += " AND v.visit_date >= :start_date"
+        params["start_date"] = start_date
+
+    if end_date is not None:
+        query += " AND v.visit_date <= :end_date"
+        params["end_date"] = end_date
+
+    result = db.execute(text(query), params).fetchall()
+
     buffer = io.BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=letter)
-    pdf.setTitle("RWE Ophthalmology Report")
+    p = canvas.Canvas(buffer, pagesize=letter)
+    p.setTitle("RWE Ophthalmology Report")
 
-    pdf.setFont("Helvetica-Bold", 16)
-    pdf.drawString(50, 750, "Ophthalmology RWE Report")
+    # Header
+    p.setFont("Helvetica-Bold", 16)
+    p.drawString(50, 750, "Ophthalmology RWE Platform Report")
+    p.setFont("Helvetica", 10)
+    p.drawString(50, 735, f"Report Generated: {date.today()}")
 
-    pdf.setFont("Helvetica", 12)
-    y = 720
-    pdf.drawString(50, y, "Filters Applied:")
-    pdf.drawString(150, y, f"Diagnosis: {diagnosis or 'All'}, Age: {min_age or 'NA'}-{max_age or 'NA'}, Date: {start_date or 'NA'}-{end_date or 'NA'}")
+    # Table Header
+    y = 700
+    p.setFont("Helvetica-Bold", 10)
+    p.drawString(50, y, "Date")
+    p.drawString(130, y, "BCVA")
+    p.drawString(180, y, "Injections")
+    p.drawString(250, y, "Age")
+    p.drawString(300, y, "Diagnosis")
+    p.line(50, y-5, 550, y-5)
 
-    y -= 30
-    pdf.drawString(50, y, "Date       BCVA     Injections     Age     Diagnosis")
+    # Data Rows
     y -= 20
-
+    p.setFont("Helvetica", 10)
     for row in result:
-        date_str = row[0].strftime("%Y-%m-%d")
-        bcva = row[1]
-        inj = row[2]
-        age = row[3]
-        diag = row[4]
-        pdf.drawString(50, y, f"{date_str}   {bcva}          {inj}            {age}      {diag}")
-        y -= 20
-        if y < 50:
-            pdf.showPage()
+        if y < 50:  # New page if bottom reached
+            p.showPage()
             y = 750
+        p.drawString(50, y, str(row[0]))
+        p.drawString(130, y, str(row[1]))
+        p.drawString(180, y, str(row[2]))
+        p.drawString(250, y, str(row[3]))
+        p.drawString(300, y, str(row[4]))
+        y -= 20
 
-    pdf.save()
+    p.save()
     buffer.seek(0)
-
-    return FileResponse(buffer, media_type="application/pdf", filename="RWE_Report.pdf")
-
+    return StreamingResponse(
+    buffer,
+    media_type="application/pdf",
+    headers={"Content-Disposition": "attachment; filename=Ophthalmology_Report.pdf"}
+)

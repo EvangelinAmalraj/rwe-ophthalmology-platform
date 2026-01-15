@@ -7,74 +7,116 @@ import {
 } from "recharts";
 import "./App.css";
 
+/* ================= BACKEND BASE URL ================= */
+const API_BASE = "http://127.0.0.1:8000";
+
 function App() {
-  // ---------------- DATA STATE ----------------
+  /* ================= DATA STATE ================= */
   const [bcvaTrend, setBcvaTrend] = useState([]);
   const [injData, setInjData] = useState([]);
   const [fluidData, setFluidData] = useState([]);
   const [hardHrfData, setHardHrfData] = useState([]);
+  const [hasAppliedFilters, setHasAppliedFilters] = useState(false);
 
-  // ---------------- FILTER STATE ----------------
+  /* ================= FILTER STATE ================= */
   const [diagnosis, setDiagnosis] = useState("");
   const [minAge, setMinAge] = useState("");
   const [maxAge, setMaxAge] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
 
-  // ---------------- FETCH BCVA WITH FILTERS ----------------
-  const fetchFilteredBCVA = () => {
-    let url = "http://127.0.0.1:8000/analytics/bcva-filtered?";
+  /* ================= BUILD QUERY STRING FROM FILTERS ================= */
+  const buildFilterQuery = () => {
+    const params = new URLSearchParams();
 
-    if (diagnosis !== "") url += `diagnosis=${diagnosis}&`;
-    if (minAge !== "") url += `min_age=${minAge}&`;
-    if (maxAge !== "") url += `max_age=${maxAge}&`;
-    if (startDate !== "") url += `start_date=${startDate}&`;
-    if (endDate !== "") url += `end_date=${endDate}&`;
+    if (diagnosis) params.append("diagnosis", diagnosis);
+    if (minAge) params.append("min_age", minAge);
+    if (maxAge) params.append("max_age", maxAge);
+    if (startDate) params.append("start_date", startDate);
+    if (endDate) params.append("end_date", endDate);
 
-    fetch(url)
-      .then((res) => {
-        if (!res.ok) throw new Error("Backend error");
-        return res.json();
-      })
-      .then((data) => setBcvaTrend(data))
-      .catch((err) => console.error("BCVA fetch error:", err));
+    return params.toString();
   };
 
-  // ---------------- FETCH OTHER CHARTS ----------------
-  const fetchOtherCharts = () => {
-    fetch("http://127.0.0.1:8000/analytics/injection-bcva")
-      .then((res) => res.json())
-      .then((data) => setInjData(data));
+  /* ================= FETCH BCVA WITH FILTERS ================= */
+  const fetchFilteredBCVA = async (queryString) => {
+    try {
+      const url = queryString
+        ? `${API_BASE}/analytics/bcva-filtered?${queryString}`
+        : `${API_BASE}/analytics/bcva-filtered`;
 
-    fetch("http://127.0.0.1:8000/analytics/fluid")
-      .then((res) => res.json())
-      .then((data) => setFluidData(data));
+      const res = await fetch(url);
 
-    fetch("http://127.0.0.1:8000/analytics/hard-hrf")
-      .then((res) => res.json())
-      .then((data) => setHardHrfData(data));
+      if (!res.ok) {
+        throw new Error(`BCVA API failed: ${res.status}`);
+      }
+
+      const data = await res.json();
+      setBcvaTrend(data);
+    } catch (err) {
+      console.error("BCVA fetch error:", err);
+      setBcvaTrend([]);
+    }
   };
 
-  // ---------------- EXPORT PDF ----------------
+  /* ================= FETCH OTHER CHARTS (FILTER AWARE) ================= */
+  const fetchOtherCharts = async (queryString) => {
+    try {
+      const qs = queryString ? `?${queryString}` : "";
+
+      const injRes = await fetch(`${API_BASE}/analytics/injection-bcva${qs}`);
+      if (injRes.ok) {
+        setInjData(await injRes.json());
+      } else {
+        setInjData([]);
+      }
+
+      const fluidRes = await fetch(`${API_BASE}/analytics/fluid${qs}`);
+      if (fluidRes.ok) {
+        setFluidData(await fluidRes.json());
+      } else {
+        setFluidData([]);
+      }
+
+      const hardHrfRes = await fetch(`${API_BASE}/analytics/hard-hrf${qs}`);
+      if (hardHrfRes.ok) {
+        setHardHrfData(await hardHrfRes.json());
+      } else {
+        setHardHrfData([]);
+      }
+    } catch (err) {
+      console.error("Other charts fetch error:", err);
+    }
+  };
+
+  /* ================= EXPORT PDF ================= */
   const exportPDF = () => {
-    let url = "http://127.0.0.1:8000/export/pdf?";
-
-    if (diagnosis !== "") url += `diagnosis=${diagnosis}&`;
-    if (minAge !== "") url += `min_age=${minAge}&`;
-    if (maxAge !== "") url += `max_age=${maxAge}&`;
-    if (startDate !== "") url += `start_date=${startDate}&`;
-    if (endDate !== "") url += `end_date=${endDate}&`;
+    const queryString = buildFilterQuery();
+    const url = queryString
+      ? `${API_BASE}/export/pdf?${queryString}`
+      : `${API_BASE}/export/pdf`;
 
     window.open(url, "_blank");
   };
 
-  // ---------------- INITIAL LOAD ----------------
+  /* ================= APPLY FILTERS HANDLER ================= */
+  const applyFilters = () => {
+    const queryString = buildFilterQuery();
+
+    // Fetch all charts based on the current filters
+    fetchFilteredBCVA(queryString);
+    fetchOtherCharts(queryString);
+
+    // Show the charts only after filters have been applied at least once
+    setHasAppliedFilters(true);
+  };
+
+  // No initial data load: charts will stay hidden until filters are applied
   useEffect(() => {
-    fetchFilteredBCVA();
-    fetchOtherCharts();
+    // intentionally empty
   }, []);
 
-  // ---------------- UI ----------------
+  /* ================= UI ================= */
   return (
     <div className="container">
       <h1>Ophthalmology RWE Dashboard</h1>
@@ -100,56 +142,60 @@ function App() {
         <label>End Date</label>
         <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
 
-        <button onClick={fetchFilteredBCVA}>Apply Filters</button>
+        <button onClick={applyFilters}>Apply Filters</button>
         <button onClick={exportPDF}>Export PDF</button>
       </div>
 
       {/* DASHBOARD */}
-      <div className="grid">
-        <div>
-          <h3>BCVA Trend</h3>
-          <LineChart width={400} height={250} data={bcvaTrend}>
-            <XAxis dataKey="date" />
-            <YAxis />
-            <Tooltip />
-            <CartesianGrid strokeDasharray="3 3" />
-            <Line type="monotone" dataKey="bcva" />
-          </LineChart>
-        </div>
+      {hasAppliedFilters ? (
+        <div className="grid">
+          <div>
+            <h3>BCVA Trend</h3>
+            <LineChart width={400} height={250} data={bcvaTrend}>
+              <XAxis dataKey="date" />
+              <YAxis />
+              <Tooltip />
+              <CartesianGrid strokeDasharray="3 3" />
+              <Line type="monotone" dataKey="bcva" />
+            </LineChart>
+          </div>
 
-        <div>
-          <h3>Injection vs BCVA</h3>
-          <BarChart width={400} height={250} data={injData}>
-            <XAxis dataKey="injections" />
-            <YAxis />
-            <Tooltip />
-            <CartesianGrid strokeDasharray="3 3" />
-            <Bar dataKey="avg_bcva" />
-          </BarChart>
-        </div>
+          <div>
+            <h3>Injection vs BCVA</h3>
+            <BarChart width={400} height={250} data={injData}>
+              <XAxis dataKey="injections" />
+              <YAxis />
+              <Tooltip />
+              <CartesianGrid strokeDasharray="3 3" />
+              <Bar dataKey="avg_bcva" />
+            </BarChart>
+          </div>
 
-        <div>
-          <h3>IRF / SRF</h3>
-          <BarChart width={400} height={250} data={fluidData}>
-            <XAxis dataKey="type" />
-            <YAxis />
-            <Tooltip />
-            <CartesianGrid strokeDasharray="3 3" />
-            <Bar dataKey="count" />
-          </BarChart>
-        </div>
+          <div>
+            <h3>IRF / SRF</h3>
+            <BarChart width={400} height={250} data={fluidData}>
+              <XAxis dataKey="type" />
+              <YAxis />
+              <Tooltip />
+              <CartesianGrid strokeDasharray="3 3" />
+              <Bar dataKey="count" />
+            </BarChart>
+          </div>
 
-        <div>
-          <h3>Hard Exudates / HRF</h3>
-          <BarChart width={400} height={250} data={hardHrfData}>
-            <XAxis dataKey="type" />
-            <YAxis />
-            <Tooltip />
-            <CartesianGrid strokeDasharray="3 3" />
-            <Bar dataKey="count" />
-          </BarChart>
+          <div>
+            <h3>Hard Exudates / HRF</h3>
+            <BarChart width={400} height={250} data={hardHrfData}>
+              <XAxis dataKey="type" />
+              <YAxis />
+              <Tooltip />
+              <CartesianGrid strokeDasharray="3 3" />
+              <Bar dataKey="count" />
+            </BarChart>
+          </div>
         </div>
-      </div>
+      ) : (
+        <p style={{ marginTop: "2rem" }}>Apply filters and click "Apply Filters" to see the charts.</p>
+      )}
     </div>
   );
 }
